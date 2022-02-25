@@ -481,7 +481,8 @@ func (self *Client) findRTSP() (block []byte, data []byte, err error) {
 					}
 					return
 				} else {
-					fmt.Println("Left < 0 ", blocklen, len(peek), left)
+					err = errors.Errorf("Left < 0 %d,%d,%d", blocklen, len(peek), left)
+					return
 				}
 			}
 			stat = 0

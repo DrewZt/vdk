@@ -12,6 +12,7 @@ import (
 	"html"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/url"
 	"strconv"
@@ -548,13 +549,15 @@ func stringInBetween(str string, start string, end string) (result string) {
 }
 
 func (client *RTSPClient) RTPDemuxer(payloadRAW *[]byte) ([]*av.Packet, bool) {
+
 	content := *payloadRAW
 	firstByte := content[4]
 	padding := (firstByte>>5)&1 == 1
 	extension := (firstByte>>4)&1 == 1
 	CSRCCnt := int(firstByte & 0x0f)
 	SequenceNumber := int(binary.BigEndian.Uint16(content[6:8]))
-	timestamp := int64(binary.BigEndian.Uint32(content[8:12]))
+	timestamp := int64(binary.BigEndian.Uint32(content[8:16]))
+
 	offset := RTPHeaderSize
 
 	end := len(content)
@@ -582,6 +585,14 @@ func (client *RTSPClient) RTPDemuxer(payloadRAW *[]byte) ([]*av.Packet, bool) {
 	case client.videoID:
 		if client.PreVideoTS == 0 {
 			client.PreVideoTS = timestamp
+		}
+		if timestamp-client.PreVideoTS < 0 {
+			if math.MaxUint32-client.PreVideoTS < 90*100 { //100 ms
+				client.PreVideoTS = 0
+				client.PreVideoTS -= (math.MaxUint32 - client.PreVideoTS)
+			} else {
+				client.PreVideoTS = 0
+			}
 		}
 		if client.PreSequenceNumber != 0 && SequenceNumber-client.PreSequenceNumber != 1 {
 			client.Println("drop packet", SequenceNumber-1)
@@ -661,7 +672,30 @@ func (client *RTSPClient) RTPDemuxer(payloadRAW *[]byte) ([]*av.Packet, bool) {
 				case naluType == 8:
 					client.CodecUpdatePPS(nal)
 				case naluType == 24:
-					client.Println("24 Type need add next version report https://github.com/deepch/vdk")
+					packet := nal[1:]
+					for len(packet) >= 2 {
+						size := int(packet[0])<<8 | int(packet[1])
+						if size+2 > len(packet) {
+							break
+						}
+						naluTypefs := packet[2] & 0x1f
+						switch {
+						case naluTypefs >= 1 && naluTypefs <= 5:
+							retmap = append(retmap, &av.Packet{
+								Data:            append(binSize(len(packet[2:size+2])), packet[2:size+2]...),
+								CompositionTime: time.Duration(1) * time.Millisecond,
+								Idx:             client.videoIDX,
+								IsKeyFrame:      naluType == 5,
+								Duration:        time.Duration(float32(timestamp-client.PreVideoTS)/90) * time.Millisecond,
+								Time:            time.Duration(timestamp/90) * time.Millisecond,
+							})
+						case naluTypefs == 7:
+							client.CodecUpdateSPS(packet[2 : size+2])
+						case naluTypefs == 8:
+							client.CodecUpdatePPS(packet[2 : size+2])
+						}
+						packet = packet[size+2:]
+					}
 				case naluType == 28:
 					fuIndicator := content[offset]
 					fuHeader := content[offset+1]
@@ -705,7 +739,7 @@ func (client *RTSPClient) RTPDemuxer(payloadRAW *[]byte) ([]*av.Packet, bool) {
 						}
 					}
 				default:
-					//client.Println("Unsupported NAL Type", naluType)
+					client.Println("Unsupported NAL Type", naluType)
 				}
 			}
 		}
@@ -898,7 +932,9 @@ func (client *RTSPClient) CodecUpdateVPS(val []byte) {
 	} else {
 		client.CodecData = append(client.CodecData, codecData)
 	}
+
 	client.Signals <- SignalCodecUpdate
+
 }
 
 //Println mini logging functions
